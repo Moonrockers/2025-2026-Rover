@@ -1,0 +1,512 @@
+
+"""
+Intel RealSense D435i Camera Node for Mars Rover
+Handles RGB, Depth, and IMU data from the D435i camera
+"""
+
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image, Imu, CameraInfo, PointCloud2
+from std_msgs.msg import Header
+from cv_bridge import CvBridge
+import pyrealsense2 as rs
+import numpy as np
+import sensor_msgs_py.point_cloud2 as pc2
+
+# ============================================================================
+# REALSENSE D435i NODE
+# ============================================================================
+
+class RealSenseD435iNode(Node):
+    def __init__(self):
+        super().__init__('realsense_d435i')
+        
+        # Declare parameters
+        self.declare_parameter('camera_name', 'realsense')
+        self.declare_parameter('color_width', 640)
+        self.declare_parameter('color_height', 480)
+        self.declare_parameter('depth_width', 640)
+        self.declare_parameter('depth_height', 480)
+        self.declare_parameter('fps', 30)
+        self.declare_parameter('enable_pointcloud', True)
+        self.declare_parameter('enable_imu', True)
+        
+        # Get parameters
+        self.camera_name = self.get_parameter('camera_name').value
+        self.color_width = self.get_parameter('color_width').value
+        self.color_height = self.get_parameter('color_height').value
+        self.depth_width = self.get_parameter('depth_width').value
+        self.depth_height = self.get_parameter('depth_height').value
+        self.fps = self.get_parameter('fps').value
+        self.enable_pointcloud = self.get_parameter('enable_pointcloud').value
+        self.enable_imu = self.get_parameter('enable_imu').value
+        
+        # Publishers
+        self.color_pub = self.create_publisher(
+            Image, 
+            f'/{self.camera_name}/color/image_raw', 
+            10
+        )
+        self.depth_pub = self.create_publisher(
+            Image, 
+            f'/{self.camera_name}/depth/image_raw', 
+            10
+        )
+        self.color_info_pub = self.create_publisher(
+            CameraInfo, 
+            f'/{self.camera_name}/color/camera_info', 
+            10
+        )
+        self.depth_info_pub = self.create_publisher(
+            CameraInfo, 
+            f'/{self.camera_name}/depth/camera_info', 
+            10
+        )
+        
+        if self.enable_pointcloud:
+            self.pointcloud_pub = self.create_publisher(
+                PointCloud2, 
+                f'/{self.camera_name}/depth/points', 
+                10
+            )
+        
+        if self.enable_imu:
+            self.imu_pub = self.create_publisher(
+                Imu, 
+                f'/{self.camera_name}/imu', 
+                10
+            )
+            self.accel_pub = self.create_publisher(
+                Imu,
+                f'/{self.camera_name}/accel/sample',
+                10
+            )
+            self.gyro_pub = self.create_publisher(
+                Imu,
+                f'/{self.camera_name}/gyro/sample',
+                10
+            )
+        
+        # CV Bridge for image conversion
+        self.bridge = CvBridge()
+        
+        # Initialize RealSense pipeline
+        self.pipeline = rs.pipeline()
+        self.config = rs.config()
+        
+        # Configure streams
+        self.config.enable_stream(
+            rs.stream.color, 
+            self.color_width, 
+            self.color_height, 
+            rs.format.bgr8, 
+            self.fps
+        )
+        self.config.enable_stream(
+            rs.stream.depth, 
+            self.depth_width, 
+            self.depth_height, 
+            rs.format.z16, 
+            self.fps
+        )
+        
+        if self.enable_imu:
+            self.config.enable_stream(rs.stream.accel)
+            self.config.enable_stream(rs.stream.gyro)
+        
+        # Start pipeline
+        try:
+            self.profile = self.pipeline.start(self.config)
+            self.get_logger().info('RealSense D435i pipeline started successfully')
+            
+            # Get camera intrinsics
+            self.color_intrinsics = self.profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+            self.depth_intrinsics = self.profile.get_stream(rs.stream.depth).as_video_stream_profile().get_intrinsics()
+            
+            # Align depth to color
+            self.align = rs.align(rs.stream.color)
+            
+            # Point cloud object
+            if self.enable_pointcloud:
+                self.pc = rs.pointcloud()
+            
+            # Create timer for publishing frames
+            self.timer = self.create_timer(1.0 / self.fps, self.publish_frames)
+            
+        except Exception as e:
+            self.get_logger().error(f'Failed to start RealSense pipeline: {e}')
+            raise
+    
+    def publish_frames(self):
+        """Capture and publish camera frames"""
+        try:
+            # Wait for frames
+            frames = self.pipeline.wait_for_frames(timeout_ms=1000)
+            
+            # Align depth to color
+            aligned_frames = self.align.process(frames)
+            
+            # Get aligned frames
+            color_frame = aligned_frames.get_color_frame()
+            depth_frame = aligned_frames.get_depth_frame()
+            
+            if not color_frame or not depth_frame:
+                self.get_logger().warn('Did not receive frames')
+                return
+            
+            # Get timestamp
+            timestamp = self.get_clock().now().to_msg()
+            
+            # Publish color image
+            self.publish_color_image(color_frame, timestamp)
+            
+            # Publish depth image
+            self.publish_depth_image(depth_frame, timestamp)
+            
+            # Publish camera info
+            self.publish_camera_info(timestamp)
+            
+            # Publish point cloud
+            if self.enable_pointcloud:
+                self.publish_pointcloud(color_frame, depth_frame, timestamp)
+            
+            # Publish IMU data
+            if self.enable_imu:
+                self.publish_imu_data(frames, timestamp)
+            
+        except Exception as e:
+            self.get_logger().error(f'Error publishing frames: {e}')
+    
+    def publish_color_image(self, color_frame, timestamp):
+        """Publish RGB color image"""
+        # Convert to numpy array
+        color_image = np.asanyarray(color_frame.get_data())
+        
+        # Convert to ROS Image message
+        color_msg = self.bridge.cv2_to_imgmsg(color_image, encoding='bgr8')
+        color_msg.header.stamp = timestamp
+        color_msg.header.frame_id = f'{self.camera_name}_color_optical_frame'
+        
+        self.color_pub.publish(color_msg)
+    
+    def publish_depth_image(self, depth_frame, timestamp):
+        """Publish depth image"""
+        # Convert to numpy array (16-bit depth in millimeters)
+        depth_image = np.asanyarray(depth_frame.get_data())
+        
+        # Convert to ROS Image message
+        depth_msg = self.bridge.cv2_to_imgmsg(depth_image, encoding='16UC1')
+        depth_msg.header.stamp = timestamp
+        depth_msg.header.frame_id = f'{self.camera_name}_depth_optical_frame'
+        
+        self.depth_pub.publish(depth_msg)
+    
+    def publish_camera_info(self, timestamp):
+        """Publish camera calibration info"""
+        # Color camera info
+        color_info = CameraInfo()
+        color_info.header.stamp = timestamp
+        color_info.header.frame_id = f'{self.camera_name}_color_optical_frame'
+        color_info.width = self.color_intrinsics.width
+        color_info.height = self.color_intrinsics.height
+        color_info.distortion_model = 'plumb_bob'
+        
+        # Intrinsic parameters
+        color_info.k = [
+            self.color_intrinsics.fx, 0.0, self.color_intrinsics.ppx,
+            0.0, self.color_intrinsics.fy, self.color_intrinsics.ppy,
+            0.0, 0.0, 1.0
+        ]
+        color_info.d = list(self.color_intrinsics.coeffs)
+        color_info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        color_info.p = [
+            self.color_intrinsics.fx, 0.0, self.color_intrinsics.ppx, 0.0,
+            0.0, self.color_intrinsics.fy, self.color_intrinsics.ppy, 0.0,
+            0.0, 0.0, 1.0, 0.0
+        ]
+        
+        self.color_info_pub.publish(color_info)
+        
+        # Depth camera info
+        depth_info = CameraInfo()
+        depth_info.header.stamp = timestamp
+        depth_info.header.frame_id = f'{self.camera_name}_depth_optical_frame'
+        depth_info.width = self.depth_intrinsics.width
+        depth_info.height = self.depth_intrinsics.height
+        depth_info.distortion_model = 'plumb_bob'
+        
+        depth_info.k = [
+            self.depth_intrinsics.fx, 0.0, self.depth_intrinsics.ppx,
+            0.0, self.depth_intrinsics.fy, self.depth_intrinsics.ppy,
+            0.0, 0.0, 1.0
+        ]
+        depth_info.d = list(self.depth_intrinsics.coeffs)
+        depth_info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        depth_info.p = [
+            self.depth_intrinsics.fx, 0.0, self.depth_intrinsics.ppx, 0.0,
+            0.0, self.depth_intrinsics.fy, self.depth_intrinsics.ppy, 0.0,
+            0.0, 0.0, 1.0, 0.0
+        ]
+        
+        self.depth_info_pub.publish(depth_info)
+    
+    def publish_pointcloud(self, color_frame, depth_frame, timestamp):
+        """Publish 3D point cloud"""
+        # Calculate point cloud
+        self.pc.map_to(color_frame)
+        points = self.pc.calculate(depth_frame)
+        
+        # Get vertices and texture coordinates
+        vertices = np.asanyarray(points.get_vertices()).view(np.float32).reshape(-1, 3)
+        colors = np.asanyarray(color_frame.get_data()).reshape(-1, 3)
+        
+        # Filter out invalid points
+        valid = ~np.isnan(vertices).any(axis=1)
+        vertices = vertices[valid]
+        colors = colors[valid]
+        
+        # Create PointCloud2 message
+        header = Header()
+        header.stamp = timestamp
+        header.frame_id = f'{self.camera_name}_depth_optical_frame'
+        
+        # Combine xyz and rgb
+        points_rgb = np.zeros((vertices.shape[0],), dtype=[
+            ('x', np.float32),
+            ('y', np.float32),
+            ('z', np.float32),
+            ('rgb', np.uint32)
+        ])
+        
+        points_rgb['x'] = vertices[:, 0]
+        points_rgb['y'] = vertices[:, 1]
+        points_rgb['z'] = vertices[:, 2]
+        
+        # Pack RGB into single uint32
+        rgb = colors.astype(np.uint32)
+        points_rgb['rgb'] = (rgb[:, 2] << 16) | (rgb[:, 1] << 8) | rgb[:, 0]
+        
+        # Create point cloud message
+        pc_msg = pc2.create_cloud(header, [
+            pc2.PointField(name='x', offset=0, datatype=pc2.PointField.FLOAT32, count=1),
+            pc2.PointField(name='y', offset=4, datatype=pc2.PointField.FLOAT32, count=1),
+            pc2.PointField(name='z', offset=8, datatype=pc2.PointField.FLOAT32, count=1),
+            pc2.PointField(name='rgb', offset=12, datatype=pc2.PointField.UINT32, count=1),
+        ], points_rgb.tolist())
+        
+        self.pointcloud_pub.publish(pc_msg)
+    
+    def publish_imu_data(self, frames, timestamp):
+        """Publish IMU data (accelerometer and gyroscope)"""
+        try:
+            # Get IMU frames
+            accel_frame = frames.first_or_default(rs.stream.accel)
+            gyro_frame = frames.first_or_default(rs.stream.gyro)
+            
+            # Create combined IMU message
+            imu_msg = Imu()
+            imu_msg.header.stamp = timestamp
+            imu_msg.header.frame_id = f'{self.camera_name}_imu_optical_frame'
+            
+            if accel_frame:
+                accel_data = accel_frame.as_motion_frame().get_motion_data()
+                imu_msg.linear_acceleration.x = accel_data.x
+                imu_msg.linear_acceleration.y = accel_data.y
+                imu_msg.linear_acceleration.z = accel_data.z
+                
+                # Publish separate accel message
+                accel_msg = Imu()
+                accel_msg.header = imu_msg.header
+                accel_msg.linear_acceleration = imu_msg.linear_acceleration
+                self.accel_pub.publish(accel_msg)
+            
+            if gyro_frame:
+                gyro_data = gyro_frame.as_motion_frame().get_motion_data()
+                imu_msg.angular_velocity.x = gyro_data.x
+                imu_msg.angular_velocity.y = gyro_data.y
+                imu_msg.angular_velocity.z = gyro_data.z
+                
+                # Publish separate gyro message
+                gyro_msg = Imu()
+                gyro_msg.header = imu_msg.header
+                gyro_msg.angular_velocity = imu_msg.angular_velocity
+                self.gyro_pub.publish(gyro_msg)
+            
+            # Publish combined IMU message
+            self.imu_pub.publish(imu_msg)
+            
+        except Exception as e:
+            self.get_logger().debug(f'IMU data not available: {e}')
+    
+    def destroy_node(self):
+        """Clean up resources"""
+        try:
+            self.pipeline.stop()
+            self.get_logger().info('RealSense pipeline stopped')
+        except Exception as e:
+            self.get_logger().error(f'Error stopping pipeline: {e}')
+        
+        super().destroy_node()
+
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+def main(args=None):
+    rclpy.init(args=args)
+    
+    try:
+        node = RealSenseD435iNode()
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(f'Error: {e}')
+    finally:
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+
+
+# ============================================================================
+# LAUNCH FILE (realsense_d435i_launch.py)
+# ============================================================================
+"""
+from launch import LaunchDescription
+from launch_ros.actions import Node
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+
+def generate_launch_description():
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            'camera_name',
+            default_value='realsense',
+            description='Camera namespace'
+        ),
+        DeclareLaunchArgument(
+            'color_width',
+            default_value='640',
+            description='Color image width'
+        ),
+        DeclareLaunchArgument(
+            'color_height',
+            default_value='480',
+            description='Color image height'
+        ),
+        DeclareLaunchArgument(
+            'depth_width',
+            default_value='640',
+            description='Depth image width'
+        ),
+        DeclareLaunchArgument(
+            'depth_height',
+            default_value='480',
+            description='Depth image height'
+        ),
+        DeclareLaunchArgument(
+            'fps',
+            default_value='30',
+            description='Frames per second'
+        ),
+        DeclareLaunchArgument(
+            'enable_pointcloud',
+            default_value='true',
+            description='Enable point cloud publishing'
+        ),
+        DeclareLaunchArgument(
+            'enable_imu',
+            default_value='true',
+            description='Enable IMU data publishing'
+        ),
+        
+        Node(
+            package='mars_rover',
+            executable='realsense_d435i',
+            name='realsense_d435i',
+            output='screen',
+            parameters=[{
+                'camera_name': LaunchConfiguration('camera_name'),
+                'color_width': LaunchConfiguration('color_width'),
+                'color_height': LaunchConfiguration('color_height'),
+                'depth_width': LaunchConfiguration('depth_width'),
+                'depth_height': LaunchConfiguration('depth_height'),
+                'fps': LaunchConfiguration('fps'),
+                'enable_pointcloud': LaunchConfiguration('enable_pointcloud'),
+                'enable_imu': LaunchConfiguration('enable_imu'),
+            }]
+        ),
+    ])
+"""
+
+
+# ============================================================================
+# URDF/XACRO SNIPPET (realsense_d435i.urdf.xacro)
+# ============================================================================
+"""
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  
+  <xacro:macro name="realsense_d435i" params="parent *origin name:=realsense">
+    
+    <!-- Camera link -->
+    <link name="${name}_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="0.025 0.090 0.025"/>
+        </geometry>
+        <material name="aluminum">
+          <color rgba="0.5 0.5 0.5 1"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="0.025 0.090 0.025"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="0.072"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+      </inertial>
+    </link>
+    
+    <!-- Attach camera to parent -->
+    <joint name="${name}_joint" type="fixed">
+      <xacro:insert_block name="origin"/>
+      <parent link="${parent}"/>
+      <child link="${name}_link"/>
+    </joint>
+    
+    <!-- Optical frames -->
+    <link name="${name}_color_optical_frame"/>
+    <joint name="${name}_color_optical_joint" type="fixed">
+      <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+      <parent link="${name}_link"/>
+      <child link="${name}_color_optical_frame"/>
+    </joint>
+    
+    <link name="${name}_depth_optical_frame"/>
+    <joint name="${name}_depth_optical_joint" type="fixed">
+      <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+      <parent link="${name}_link"/>
+      <child link="${name}_depth_optical_frame"/>
+    </joint>
+    
+    <link name="${name}_imu_optical_frame"/>
+    <joint name="${name}_imu_optical_joint" type="fixed">
+      <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+      <parent link="${name}_link"/>
+      <child link="${name}_imu_optical_frame"/>
+    </joint>
+    
+  </xacro:macro>
+  
+</robot>
+"""
