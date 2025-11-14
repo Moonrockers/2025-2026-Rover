@@ -1,0 +1,545 @@
+"""
+Mars Rover Teleoperation ROS2 Package
+Remote-controlled rover system for Mars operations
+"""
+
+# ============================================================================
+# 1. PACKAGE SETUP (package.xml)
+# ============================================================================
+"""
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mars_rover</name>
+  <version>0.1.0</version>
+  <description>Mars Rover teleoperation package</description>
+  <maintainer email="team@marsrover.com">Mars Rover Team</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
+"""
+
+# ============================================================================
+# 2. MOTOR CONTROLLER NODE (motor_controller.py)
+# ============================================================================
+
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import Twist
+from std_msgs.msg import Float64MultiArray, Bool
+import time
+
+class MotorController(Node):
+    def __init__(self):
+        super().__init__('motor_controller')
+        
+        # Subscribe to velocity commands from teleop
+        self.cmd_vel_sub = self.create_subscription(
+            Twist,
+            'cmd_vel',
+            self.cmd_vel_callback,
+            10
+        )
+        
+        # Subscribe to emergency stop
+        self.estop_sub = self.create_subscription(
+            Bool,
+            'emergency_stop',
+            self.estop_callback,
+            10
+        )
+        
+        # Publish motor speeds to hardware interface
+        self.motor_pub = self.create_publisher(
+            Float64MultiArray,
+            'motor_speeds',
+            10
+        )
+        
+        # Rover parameters
+        self.wheel_base = 0.5  # meters between left and right wheels
+        self.wheel_radius = 0.1  # meters
+        self.max_speed = 2.0  # max m/s
+        
+        # Safety parameters
+        self.emergency_stop = False
+        self.last_cmd_time = time.time()
+        self.cmd_timeout = 1.0  # stop if no command for 1 second
+        
+        # Watchdog timer
+        self.timer = self.create_timer(0.1, self.watchdog)
+        
+        self.get_logger().info('Motor Controller initialized - Ready for teleoperation')
+    
+    def cmd_vel_callback(self, msg):
+        """Convert twist commands to individual wheel speeds"""
+        if self.emergency_stop:
+            self.get_logger().warn('Emergency stop active - ignoring commands')
+            return
+        
+        self.last_cmd_time = time.time()
+        
+        linear_vel = msg.linear.x
+        angular_vel = msg.angular.z
+        
+        # Limit maximum speed
+        linear_vel = max(-self.max_speed, min(self.max_speed, linear_vel))
+        
+        # Differential drive kinematics
+        left_vel = (linear_vel - angular_vel * self.wheel_base / 2.0) / self.wheel_radius
+        right_vel = (linear_vel + angular_vel * self.wheel_base / 2.0) / self.wheel_radius
+        
+        # Publish motor speeds (assuming 4-wheel drive)
+        motor_speeds = Float64MultiArray()
+        motor_speeds.data = [left_vel, right_vel, left_vel, right_vel]
+        self.motor_pub.publish(motor_speeds)
+        
+        self.get_logger().debug(f'Motor speeds: L={left_vel:.2f}, R={right_vel:.2f}')
+    
+    def estop_callback(self, msg):
+        """Handle emergency stop"""
+        self.emergency_stop = msg.data
+        if self.emergency_stop:
+            self.stop_motors()
+            self.get_logger().error('EMERGENCY STOP ACTIVATED')
+        else:
+            self.get_logger().info('Emergency stop released')
+    
+    def watchdog(self):
+        """Stop motors if no command received recently"""
+        if time.time() - self.last_cmd_time > self.cmd_timeout:
+            self.stop_motors()
+    
+    def stop_motors(self):
+        """Send stop command to all motors"""
+        motor_speeds = Float64MultiArray()
+        motor_speeds.data = [0.0, 0.0, 0.0, 0.0]
+        self.motor_pub.publish(motor_speeds)
+
+
+# ============================================================================
+# 3. TELEOP KEYBOARD NODE (teleop_keyboard.py)
+# ============================================================================
+
+import sys
+import select
+import termios
+import tty
+
+class TeleopKeyboard(Node):
+    def __init__(self):
+        super().__init__('teleop_keyboard')
+        
+        # Publisher for velocity commands
+        self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        
+        # Control parameters
+        self.linear_speed = 0.5  # m/s
+        self.angular_speed = 1.0  # rad/s
+        self.speed_increment = 0.1
+        
+        # Timer for publishing commands
+        self.timer = self.create_timer(0.1, self.publish_cmd)
+        
+        # Current velocities
+        self.linear_vel = 0.0
+        self.angular_vel = 0.0
+        
+        self.settings = termios.tcgetattr(sys.stdin)
+        
+        self.print_instructions()
+        self.get_logger().info('Keyboard Teleop initialized')
+    
+    def print_instructions(self):
+        msg = """
+        Mars Rover Keyboard Teleoperation
+        ----------------------------------
+        Moving:
+            w/s : forward/backward
+            a/d : turn left/right
+            x   : stop
+        
+        Speed Control:
+            q/z : increase/decrease max speeds by 10%
+        
+        CTRL-C to quit
+        """
+        print(msg)
+    
+    def get_key(self):
+        """Get keyboard input"""
+        tty.setraw(sys.stdin.fileno())
+        select.select([sys.stdin], [], [], 0)
+        key = sys.stdin.read(1)
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
+        return key
+    
+    def publish_cmd(self):
+        """Publish velocity commands"""
+        try:
+            key = self.get_key()
+            
+            if key == 'w':
+                self.linear_vel = self.linear_speed
+                self.angular_vel = 0.0
+            elif key == 's':
+                self.linear_vel = -self.linear_speed
+                self.angular_vel = 0.0
+            elif key == 'a':
+                self.linear_vel = 0.0
+                self.angular_vel = self.angular_speed
+            elif key == 'd':
+                self.linear_vel = 0.0
+                self.angular_vel = -self.angular_speed
+            elif key == 'x':
+                self.linear_vel = 0.0
+                self.angular_vel = 0.0
+            elif key == 'q':
+                self.linear_speed += self.speed_increment
+                self.angular_speed += self.speed_increment
+                self.get_logger().info(f'Speed increased: linear={self.linear_speed:.2f}, angular={self.angular_speed:.2f}')
+            elif key == 'z':
+                self.linear_speed = max(0.1, self.linear_speed - self.speed_increment)
+                self.angular_speed = max(0.1, self.angular_speed - self.speed_increment)
+                self.get_logger().info(f'Speed decreased: linear={self.linear_speed:.2f}, angular={self.angular_speed:.2f}')
+            elif key == '\x03':  # CTRL-C
+                raise KeyboardInterrupt
+            
+            # Publish command
+            twist = Twist()
+            twist.linear.x = self.linear_vel
+            twist.angular.z = self.angular_vel
+            self.cmd_vel_pub.publish(twist)
+            
+        except Exception as e:
+            self.get_logger().error(f'Error: {e}')
+
+
+# ============================================================================
+# 4. SENSOR MANAGER NODE (sensor_manager.py)
+# ============================================================================
+
+from sensor_msgs.msg import Image, Imu, NavSatFix, Temperature, Range
+from nav_msgs.msg import Odometry
+from std_msgs.msg import Float32
+
+class SensorManager(Node):
+    def __init__(self):
+        super().__init__('sensor_manager')
+        
+        # Publishers for sensor data
+        self.camera_front_pub = self.create_publisher(Image, 'camera/front/image_raw', 10)
+        self.camera_rear_pub = self.create_publisher(Image, 'camera/rear/image_raw', 10)
+        self.imu_pub = self.create_publisher(Imu, 'imu/data', 10)
+        self.gps_pub = self.create_publisher(NavSatFix, 'gps/fix', 10)
+        self.temp_pub = self.create_publisher(Temperature, 'temperature', 10)
+        self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
+        self.battery_pub = self.create_publisher(Float32, 'battery_voltage', 10)
+        
+        # Ultrasonic/lidar sensors
+        self.range_front_pub = self.create_publisher(Range, 'range/front', 10)
+        self.range_rear_pub = self.create_publisher(Range, 'range/rear', 10)
+        
+        # Timer for publishing sensor data (20 Hz for camera, 50 Hz for IMU)
+        self.imu_timer = self.create_timer(0.02, self.publish_imu)
+        self.sensor_timer = self.create_timer(0.05, self.publish_sensors)
+        
+        self.get_logger().info('Sensor Manager initialized')
+    
+    def publish_imu(self):
+        """Publish IMU data at high frequency"""
+        # Read from actual IMU hardware
+        imu_msg = Imu()
+        imu_msg.header.stamp = self.get_clock().now().to_msg()
+        imu_msg.header.frame_id = 'imu_link'
+        
+        # TODO: Populate with actual sensor data
+        # imu_msg.orientation.x = ...
+        # imu_msg.angular_velocity.x = ...
+        # imu_msg.linear_acceleration.x = ...
+        
+        self.imu_pub.publish(imu_msg)
+    
+    def publish_sensors(self):
+        """Publish other sensor data"""
+        timestamp = self.get_clock().now().to_msg()
+        
+        # GPS
+        gps_msg = NavSatFix()
+        gps_msg.header.stamp = timestamp
+        gps_msg.header.frame_id = 'gps_link'
+        # TODO: Populate with actual GPS data
+        self.gps_pub.publish(gps_msg)
+        
+        # Temperature
+        temp_msg = Temperature()
+        temp_msg.header.stamp = timestamp
+        # TODO: Populate with actual temperature sensor
+        self.temp_pub.publish(temp_msg)
+        
+        # Battery voltage
+        battery_msg = Float32()
+        # TODO: Read actual battery voltage
+        # battery_msg.data = read_battery_voltage()
+        self.battery_pub.publish(battery_msg)
+        
+        # Range sensors
+        range_msg = Range()
+        range_msg.header.stamp = timestamp
+        range_msg.radiation_type = Range.ULTRASOUND
+        range_msg.min_range = 0.02
+        range_msg.max_range = 4.0
+        # TODO: Read actual range sensors
+        self.range_front_pub.publish(range_msg)
+
+
+# ============================================================================
+# 5. TELEMETRY NODE (telemetry.py)
+# ============================================================================
+
+from std_msgs.msg import String, Float32
+import json
+
+class Telemetry(Node):
+    def __init__(self):
+        super().__init__('telemetry')
+        
+        # Subscribe to all sensor topics
+        self.odom_sub = self.create_subscription(Odometry, 'odom', self.odom_callback, 10)
+        self.imu_sub = self.create_subscription(Imu, 'imu/data', self.imu_callback, 10)
+        self.gps_sub = self.create_subscription(NavSatFix, 'gps/fix', self.gps_callback, 10)
+        self.temp_sub = self.create_subscription(Temperature, 'temperature', self.temp_callback, 10)
+        self.battery_sub = self.create_subscription(Float32, 'battery_voltage', self.battery_callback, 10)
+        self.motor_sub = self.create_subscription(Float64MultiArray, 'motor_speeds', self.motor_callback, 10)
+        
+        # Publisher for consolidated telemetry
+        self.telemetry_pub = self.create_publisher(String, 'telemetry', 10)
+        
+        # Store latest data
+        self.telemetry_data = {
+            'timestamp': None,
+            'position': {'x': 0, 'y': 0, 'z': 0},
+            'orientation': {'roll': 0, 'pitch': 0, 'yaw': 0},
+            'gps': {'lat': 0, 'lon': 0, 'alt': 0},
+            'temperature': 0,
+            'battery_voltage': 0,
+            'motor_speeds': [0, 0, 0, 0],
+            'status': 'OK'
+        }
+        
+        # Timer to publish telemetry (2 Hz for ground station)
+        self.timer = self.create_timer(0.5, self.publish_telemetry)
+        
+        self.get_logger().info('Telemetry initialized - Sending data to ground station')
+    
+    def odom_callback(self, msg):
+        self.telemetry_data['position'] = {
+            'x': msg.pose.pose.position.x,
+            'y': msg.pose.pose.position.y,
+            'z': msg.pose.pose.position.z
+        }
+    
+    def imu_callback(self, msg):
+        # Convert quaternion to euler angles if needed
+        self.telemetry_data['orientation'] = {
+            'x': msg.orientation.x,
+            'y': msg.orientation.y,
+            'z': msg.orientation.z,
+            'w': msg.orientation.w
+        }
+    
+    def gps_callback(self, msg):
+        self.telemetry_data['gps'] = {
+            'lat': msg.latitude,
+            'lon': msg.longitude,
+            'alt': msg.altitude
+        }
+    
+    def temp_callback(self, msg):
+        self.telemetry_data['temperature'] = msg.temperature
+    
+    def battery_callback(self, msg):
+        self.telemetry_data['battery_voltage'] = msg.data
+    
+    def motor_callback(self, msg):
+        self.telemetry_data['motor_speeds'] = list(msg.data)
+    
+    def publish_telemetry(self):
+        """Publish consolidated telemetry to ground station"""
+        self.telemetry_data['timestamp'] = self.get_clock().now().to_msg().sec
+        
+        telemetry_msg = String()
+        telemetry_msg.data = json.dumps(self.telemetry_data)
+        self.telemetry_pub.publish(telemetry_msg)
+        
+        self.get_logger().debug('Telemetry published')
+
+
+# ============================================================================
+# 6. SAFETY MONITOR NODE (safety_monitor.py)
+# ============================================================================
+
+class SafetyMonitor(Node):
+    def __init__(self):
+        super().__init__('safety_monitor')
+        
+        # Subscribe to critical sensors
+        self.battery_sub = self.create_subscription(Float32, 'battery_voltage', self.battery_callback, 10)
+        self.temp_sub = self.create_subscription(Temperature, 'temperature', self.temp_callback, 10)
+        self.imu_sub = self.create_subscription(Imu, 'imu/data', self.imu_callback, 10)
+        
+        # Emergency stop publisher
+        self.estop_pub = self.create_publisher(Bool, 'emergency_stop', 10)
+        
+        # Safety thresholds
+        self.min_battery_voltage = 10.5  # Volts
+        self.max_temperature = 85.0  # Celsius
+        self.max_tilt_angle = 45.0  # Degrees
+        
+        self.current_battery = 12.0
+        self.current_temp = 25.0
+        
+        self.get_logger().info('Safety Monitor initialized')
+    
+    def battery_callback(self, msg):
+        self.current_battery = msg.data
+        if msg.data < self.min_battery_voltage:
+            self.get_logger().error(f'CRITICAL: Battery voltage low: {msg.data:.2f}V')
+            self.trigger_estop('Low battery')
+    
+    def temp_callback(self, msg):
+        self.current_temp = msg.temperature
+        if msg.temperature > self.max_temperature:
+            self.get_logger().error(f'CRITICAL: Temperature high: {msg.temperature:.1f}C')
+            self.trigger_estop('High temperature')
+    
+    def imu_callback(self, msg):
+        # Check for excessive tilt
+        # TODO: Convert quaternion to euler and check tilt angle
+        pass
+    
+    def trigger_estop(self, reason):
+        """Trigger emergency stop"""
+        estop_msg = Bool()
+        estop_msg.data = True
+        self.estop_pub.publish(estop_msg)
+        self.get_logger().error(f'EMERGENCY STOP: {reason}')
+
+
+# ============================================================================
+# 7. MAIN ENTRY POINTS
+# ============================================================================
+
+def motor_controller_main(args=None):
+    rclpy.init(args=args)
+    node = MotorController()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+def teleop_keyboard_main(args=None):
+    rclpy.init(args=args)
+    node = TeleopKeyboard()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+def sensor_manager_main(args=None):
+    rclpy.init(args=args)
+    node = SensorManager()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+def telemetry_main(args=None):
+    rclpy.init(args=args)
+    node = Telemetry()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+def safety_monitor_main(args=None):
+    rclpy.init(args=args)
+    node = SafetyMonitor()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+# ============================================================================
+# 8. LAUNCH FILE (mars_rover_launch.py)
+# ============================================================================
+"""
+from launch import LaunchDescription
+from launch_ros.actions import Node
+
+def generate_launch_description():
+    return LaunchDescription([
+        Node(
+            package='mars_rover',
+            executable='motor_controller',
+            name='motor_controller',
+            output='screen'
+        ),
+        Node(
+            package='mars_rover',
+            executable='sensor_manager',
+            name='sensor_manager',
+            output='screen'
+        ),
+        Node(
+            package='mars_rover',
+            executable='telemetry',
+            name='telemetry',
+            output='screen'
+        ),
+        Node(
+            package='mars_rover',
+            executable='safety_monitor',
+            name='safety_monitor',
+            output='screen'
+        ),
+        # Uncomment for keyboard control:
+        # Node(
+        #     package='mars_rover',
+        #     executable='teleop_keyboard',
+        #     name='teleop_keyboard',
+        #     output='screen',
+        #     prefix='xterm -e'
+        # ),
+    ])
+"""
