@@ -1,0 +1,29 @@
+# Rover Configuration Parameters
+
+motor_controller:
+  ros__parameters:
+    wheel_base: 0.5  # meters between left and right wheels
+    wheel_radius: 0.1  # meters
+    max_speed: 2.0  # maximum speed in m/s
+    cmd_timeout: 1.0  # timeout for velocity commands in seconds
+
+teleop_keyboard:
+  ros__parameters:
+    linear_speed: 0.5  # default linear speed in m/s
+    angular_speed: 1.0  # default angular speed in rad/s
+    speed_increment: 0.1  # speed change increment
+
+safety_monitor:
+  ros__parameters:
+    min_battery_voltage: 10.5  # minimum safe battery voltage in V
+    max_temperature: 85.0  # maximum safe temperature in Celsius
+    max_tilt_angle: 45.0  # maximum safe tilt angle in degrees
+
+sensor_manager:
+  ros__parameters:
+    imu_publish_rate: 50.0  # Hz
+    sensor_publish_rate: 20.0  # Hz
+
+telemetry:
+  ros__parameters:
+    telemetry_rate: 2.0  # Hz - rate to publish consolidated telemetry
