@@ -1,0 +1,97 @@
+"""
+Launch file for custom SLAM implementation with RealSense D435i
+Place in: custom_slam/launch/custom_slam.launch.py
+"""
+
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution 
+from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
+
+def generate_launch_description():
+    
+    # Launch arguments
+    publish_tf = LaunchConfiguration('publish_tf', default='true')
+    map_resolution = LaunchConfiguration('map_resolution', default='0.05')
+    max_depth = LaunchConfiguration('max_depth', default='8.0')
+    
+    # RealSense camera node
+    realsense_node = Node(
+        package='realsense2_camera',
+        executable='realsense2_camera_node',
+        name='camera',
+        namespace='camera',
+        parameters=[{
+            'align_depth.enable': True,
+            'enable_color': True,
+            'enable_depth': True,
+            'enable_gyro': True,
+            'enable_accel': True,
+            'gyro_fps': 200,
+            'accel_fps': 100,
+            'unite_imu_method': 1,  # Linear interpolation
+            'depth_module.profile': '640x480x30',
+            'rgb_camera.profile': '640x480x30',
+            'pointcloud.enable': False,  # We'll create our own
+        }],
+        output='screen'
+    )
+    
+    # Custom SLAM node
+    custom_slam_node = Node(
+        package='custom_slam',
+        executable='custom_slam_node',
+        name='custom_slam',
+        output='screen',
+        parameters=[{
+            'publish_tf': publish_tf,
+            'map_resolution': map_resolution,
+            'max_depth': max_depth,
+        }]
+    )
+    
+    # Static transform from map to odom (initially identity)
+    static_tf_map_odom = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_map_odom',
+        arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom']
+    )
+    
+    # RViz2 for visualization
+    rviz_config = PathJoinSubstitution([
+        FindPackageShare('custom_slam'),
+        'config',
+        'custom_slam.rviz'
+    ])
+    
+    rviz_node = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        arguments=['-d', rviz_config],
+        output='screen'
+    )
+    
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            'publish_tf',
+            default_value='true',
+            description='Whether to publish TF transforms'
+        ),
+        DeclareLaunchArgument(
+            'map_resolution',
+            default_value='0.05',
+            description='Resolution of occupancy grid map in meters'
+        ),
+        DeclareLaunchArgument(
+            'max_depth',
+            default_value='8.0',
+            description='Maximum depth value to consider in meters'
+        ),
+        realsense_node,
+        custom_slam_node,
+        static_tf_map_odom,
+        rviz_node,
+    ])
