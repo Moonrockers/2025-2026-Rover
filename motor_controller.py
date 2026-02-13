@@ -69,6 +69,7 @@ class MotorController(Node):
         self.last_cmd_time = time.time()
         self.current_left_speed = 0.0
         self.current_right_speed = 0.0
+        self._shutting_down = False  # FIX: guard flag to prevent publish-after-destroy
         
         # Moving average for smooth control
         self.left_speed_buffer = deque(maxlen=5)
@@ -92,10 +93,13 @@ class MotorController(Node):
         )
         
         # Publishers
-        self.motor_status_pub = self.create_publisher(
+        # FIX: Each publisher must have its own unique variable name.
+        # Previously both were named self.motor_status_pub, so the left
+        # speed publisher was silently overwritten and never usable.
+        self.left_speed_pub = self.create_publisher(
             Float32, '/motor/left_speed', 10
         )
-        self.motor_status_pub = self.create_publisher(
+        self.right_speed_pub = self.create_publisher(
             Float32, '/motor/right_speed', 10
         )
         
@@ -196,7 +200,7 @@ class MotorController(Node):
         angular = np.clip(angular, -self.max_angular_speed, self.max_angular_speed)
         
         # Differential drive kinematics
-        # v_left = v - (w * L) / 2
+        # v_left  = v - (w * L) / 2
         # v_right = v + (w * L) / 2
         left_speed = linear - (angular * self.wheel_separation / 2.0)
         right_speed = linear + (angular * self.wheel_separation / 2.0)
@@ -214,15 +218,18 @@ class MotorController(Node):
     def set_motor_speeds(self, left_speed, right_speed):
         """
         Set individual motor speeds
-        
+
         Args:
             left_speed: m/s (positive = forward)
             right_speed: m/s (positive = forward)
         """
+        # FIX: e-stop check moved BEFORE storing speeds so
+        # current_left/right_speed reflect the true commanded state and
+        # stop_motors() can't recurse into set_motor_speeds() → stop_motors().
         if self.emergency_stop:
-            self.stop_motors()
-            return
-        
+            left_speed = 0.0
+            right_speed = 0.0
+
         # Store current speeds
         self.current_left_speed = left_speed
         self.current_right_speed = right_speed
@@ -305,9 +312,21 @@ class MotorController(Node):
     
     def stop_motors(self):
         """Emergency stop - immediately halt all motors"""
-        self.set_motor_speeds(0.0, 0.0)
+        # FIX: set speeds directly rather than calling set_motor_speeds()
+        # to avoid the recursive call chain when emergency_stop is True.
+        self.current_left_speed = 0.0
+        self.current_right_speed = 0.0
         self.left_speed_buffer.clear()
         self.right_speed_buffer.clear()
+
+        if self.motor_driver == 'l298n':
+            self.set_l298n_speeds(0.0, 0.0)
+        elif self.motor_driver == 'roboclaw':
+            self.set_roboclaw_speeds(0.0, 0.0)
+        elif self.motor_driver == 'sabertooth':
+            self.set_sabertooth_speeds(0.0, 0.0)
+
+        self.publish_motor_status()
         self.get_logger().warn('Motors stopped')
     
     def estop_callback(self, msg):
@@ -357,12 +376,25 @@ class MotorController(Node):
     
     def publish_motor_status(self):
         """Publish current motor speeds"""
-        # Could expand this to include current draw, temperature, etc.
-        pass
+        # FIX: actually publish using the correctly named publisher variables.
+        # Previously this method was a no-op because the publishers were never
+        # called (left_speed_pub didn't exist; motor_status_pub was overwritten).
+        if self._shutting_down:
+            return
+        left_msg = Float32()
+        left_msg.data = float(self.current_left_speed)
+        self.left_speed_pub.publish(left_msg)
+
+        right_msg = Float32()
+        right_msg.data = float(self.current_right_speed)
+        self.right_speed_pub.publish(right_msg)
     
     def shutdown(self):
         """Clean shutdown - stop motors and cleanup GPIO"""
         self.get_logger().info('Shutting down motor controller')
+        # FIX: set the guard flag BEFORE stopping motors so publish_motor_status()
+        # skips publishing after the node has been destroyed.
+        self._shutting_down = True
         self.stop_motors()
         
         if GPIO_AVAILABLE and self.motor_driver == 'l298n':
