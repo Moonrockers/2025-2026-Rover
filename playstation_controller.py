@@ -33,6 +33,10 @@ class PS4Button:
     # Shoulder buttons
     L1 = 4
     R1 = 5
+    # FIX: L2/R2 are digital buttons only when fully depressed on some drivers.
+    # In the standard joy driver they are AXES (PS4Axis.L2_ANALOG / R2_ANALOG).
+    # These indices are kept for edge-case drivers that expose them as buttons,
+    # but all analog trigger checks in the code now use PS4Axis instead.
     L2 = 6
     R2 = 7
     
@@ -55,10 +59,16 @@ class PS4Axis:
     LEFT_STICK_Y = 1      # Up/down on left stick
     RIGHT_STICK_X = 2     # Left/right on right stick
     RIGHT_STICK_Y = 3     # Up/down on right stick
-    L2_ANALOG = 4         # L2 trigger pressure
-    R2_ANALOG = 5         # R2 trigger pressure
+    # FIX: L2/R2 are analog axes on PS4 (range -1.0 idle → +1.0 fully pressed).
+    # The original code used msg.buttons[PS4Button.L2/R2] which read the wrong
+    # array entirely and would always evaluate to 0 / never trigger.
+    L2_ANALOG = 4         # L2 trigger pressure (-1.0 = released, +1.0 = fully pressed)
+    R2_ANALOG = 5         # R2 trigger pressure (-1.0 = released, +1.0 = fully pressed)
     DPAD_X = 6           # D-pad left/right
     DPAD_Y = 7           # D-pad up/down
+
+# Threshold for treating an analog trigger as "pressed"
+TRIGGER_THRESHOLD = 0.5
 
 
 class PlayStationController(Node):
@@ -78,6 +88,10 @@ class PlayStationController(Node):
         self.declare_parameter('turbo_multiplier', 2.0)
         self.declare_parameter('enable_rumble', True)
         self.declare_parameter('invert_y_axis', False)
+        # FIX: wheel_separation must match motor_controller so that the
+        # skid-steer → Twist conversion produces the same angular velocity
+        # that motor_controller.cmd_vel_callback expects.
+        self.declare_parameter('wheel_separation', 0.5)  # meters - MUST match motor_controller
         
         # Get parameters
         self.controller_type = self.get_parameter('controller_type').value
@@ -87,6 +101,7 @@ class PlayStationController(Node):
         self.turbo_multiplier = self.get_parameter('turbo_multiplier').value
         self.enable_rumble = self.get_parameter('enable_rumble').value
         self.invert_y = self.get_parameter('invert_y_axis').value
+        self.wheel_separation = self.get_parameter('wheel_separation').value
         
         # State
         self.control_mode = ControlMode.MANUAL_DRIVE
@@ -96,6 +111,8 @@ class PlayStationController(Node):
         
         # Button state tracking (for edge detection)
         self.prev_buttons = []
+        # FIX: also track previous trigger axis states for rising-edge detection
+        self.prev_axes = []
         
         # Digging state
         self.digging_active = False
@@ -157,20 +174,20 @@ class PlayStationController(Node):
         self.get_logger().info('DIGGING MODE:')
         self.get_logger().info('  D-Pad Up      → Increase dig depth')
         self.get_logger().info('  D-Pad Down    → Decrease dig depth')
-        self.get_logger().info('  R2            → Start digging')
-        self.get_logger().info('  L2            → Stop digging')
+        self.get_logger().info('  R2 (analog)   → Start digging')
+        self.get_logger().info('  L2 (analog)   → Stop digging')
         self.get_logger().info('  R1            → Raise excavator')
         self.get_logger().info('  L1            → Lower excavator')
         self.get_logger().info('')
         self.get_logger().info('DEPOSITION MODE:')
         self.get_logger().info('  D-Pad Up      → Increase dump angle')
         self.get_logger().info('  D-Pad Down    → Decrease dump angle')
-        self.get_logger().info('  R2            → Dump material')
-        self.get_logger().info('  L2            → Return to neutral')
+        self.get_logger().info('  R2 (analog)   → Dump material')
+        self.get_logger().info('  L2 (analog)   → Return to neutral')
         self.get_logger().info('')
         self.get_logger().info('AUTONOMOUS MODE:')
-        self.get_logger().info('  R2            → Start mission')
-        self.get_logger().info('  L2            → Stop mission')
+        self.get_logger().info('  R2 (analog)   → Start mission')
+        self.get_logger().info('  L2 (analog)   → Stop mission')
         self.get_logger().info('  R1            → Pause mission')
         self.get_logger().info('  L1            → Resume mission')
         self.get_logger().info('')
@@ -185,9 +202,11 @@ class PlayStationController(Node):
         """Store latest joystick message"""
         self.last_joy_msg = msg
         
-        # Initialize previous buttons if needed
+        # Initialize previous buttons/axes if needed
         if not self.prev_buttons:
             self.prev_buttons = list(msg.buttons)
+        if not self.prev_axes:
+            self.prev_axes = list(msg.axes)
     
     def control_loop(self):
         """Main control loop"""
@@ -198,6 +217,8 @@ class PlayStationController(Node):
         
         # Check for button presses (edge detection)
         button_pressed = self.get_button_presses(msg)
+        # FIX: detect trigger rising edges (analog axes crossing threshold)
+        trigger_pressed = self.get_trigger_presses(msg)
         
         # Handle mode switching
         self.handle_mode_switching(button_pressed)
@@ -209,14 +230,15 @@ class PlayStationController(Node):
         if self.control_mode == ControlMode.MANUAL_DRIVE:
             self.handle_manual_drive(msg)
         elif self.control_mode == ControlMode.MANUAL_DIG:
-            self.handle_manual_dig(msg, button_pressed)
+            self.handle_manual_dig(msg, button_pressed, trigger_pressed)
         elif self.control_mode == ControlMode.MANUAL_DEPOSIT:
-            self.handle_manual_deposit(msg, button_pressed)
+            self.handle_manual_deposit(msg, button_pressed, trigger_pressed)
         elif self.control_mode == ControlMode.AUTONOMOUS:
-            self.handle_autonomous(button_pressed)
+            self.handle_autonomous(button_pressed, trigger_pressed)
         
-        # Update previous buttons
+        # Update previous state
         self.prev_buttons = list(msg.buttons)
+        self.prev_axes = list(msg.axes)
         
         # Publish status
         self.publish_status()
@@ -227,6 +249,25 @@ class PlayStationController(Node):
         for i in range(min(len(msg.buttons), len(self.prev_buttons))):
             if msg.buttons[i] == 1 and self.prev_buttons[i] == 0:
                 pressed.append(i)
+        return pressed
+
+    def get_trigger_presses(self, msg):
+        """
+        Detect analog trigger rising-edge events.
+        Returns a set of axis indices that just crossed TRIGGER_THRESHOLD.
+        FIX: replaces the broken msg.buttons[PS4Button.L2/R2] pattern from the
+        original code; L2 and R2 are axes on PS4, not buttons.
+        """
+        pressed = set()
+        for axis_idx in (PS4Axis.L2_ANALOG, PS4Axis.R2_ANALOG):
+            if axis_idx >= len(msg.axes):
+                continue
+            # PS4 axis: -1.0 at rest, +1.0 fully pressed
+            was_pressed = len(self.prev_axes) > axis_idx and \
+                          self.prev_axes[axis_idx] > TRIGGER_THRESHOLD
+            is_pressed = msg.axes[axis_idx] > TRIGGER_THRESHOLD
+            if is_pressed and not was_pressed:
+                pressed.add(axis_idx)
         return pressed
     
     def handle_mode_switching(self, button_pressed):
@@ -303,16 +344,22 @@ class PlayStationController(Node):
         left_speed = left_y * self.max_linear_speed * speed_multiplier
         right_speed = right_y * self.max_linear_speed * speed_multiplier
         
-        # Convert individual wheel speeds to differential drive (Twist)
-        # Linear velocity = average of both wheels
-        # Angular velocity = difference between wheels
+        # Convert individual wheel speeds to differential drive (Twist).
+        # FIX: use proper differential-drive kinematics with wheel_separation
+        # so motor_controller.cmd_vel_callback reconstructs exactly the same
+        # left/right speeds that were commanded here.
+        #
+        #   linear  = (v_left + v_right) / 2
+        #   angular = (v_right - v_left) / wheel_separation   [rad/s]
+        #
+        # motor_controller reverses this:
+        #   v_left  = linear - angular * wheel_separation / 2
+        #   v_right = linear + angular * wheel_separation / 2
         linear = (left_speed + right_speed) / 2.0
-        
-        # Calculate angular velocity from wheel speed difference
-        # angular = (right_speed - left_speed) / wheel_separation
-        # For Twist, we'll approximate using the difference scaled to max_angular_speed
-        wheel_diff = (right_speed - left_speed) / 2.0
-        angular = (wheel_diff / self.max_linear_speed) * self.max_angular_speed
+        angular = (right_speed - left_speed) / self.wheel_separation
+
+        # Clamp to declared limits so motor_controller doesn't clip our intent
+        angular = np.clip(angular, -self.max_angular_speed, self.max_angular_speed)
         
         # Create and publish twist message
         twist = Twist()
@@ -320,7 +367,7 @@ class PlayStationController(Node):
         twist.angular.z = angular
         self.cmd_vel_pub.publish(twist)
     
-    def handle_manual_dig(self, msg, button_pressed):
+    def handle_manual_dig(self, msg, button_pressed, trigger_pressed):
         """Handle manual digging operations"""
         if self.emergency_stop:
             return
@@ -333,7 +380,6 @@ class PlayStationController(Node):
                 self.current_dig_depth = min(self.current_dig_depth, 0.5)  # Max 50cm
                 self.get_logger().info(f'Dig depth: {self.current_dig_depth:.2f}m')
                 
-                # Publish new depth
                 depth_msg = Float32()
                 depth_msg.data = self.current_dig_depth
                 self.dig_depth_pub.publish(depth_msg)
@@ -347,8 +393,9 @@ class PlayStationController(Node):
                 depth_msg.data = self.current_dig_depth
                 self.dig_depth_pub.publish(depth_msg)
         
+        # FIX: use trigger_pressed (axis rising-edge) instead of msg.buttons[R2/L2]
         # R2 to start digging
-        if len(msg.buttons) > PS4Button.R2 and msg.buttons[PS4Button.R2]:
+        if PS4Axis.R2_ANALOG in trigger_pressed:
             if not self.digging_active:
                 self.get_logger().info('⛏️  Starting digging operation')
                 cmd_msg = String()
@@ -357,7 +404,7 @@ class PlayStationController(Node):
                 self.digging_active = True
         
         # L2 to stop digging
-        if len(msg.buttons) > PS4Button.L2 and msg.buttons[PS4Button.L2]:
+        if PS4Axis.L2_ANALOG in trigger_pressed:
             if self.digging_active:
                 self.get_logger().info('⏹️  Stopping digging')
                 cmd_msg = String()
@@ -379,7 +426,7 @@ class PlayStationController(Node):
             cmd_msg.data = 'lower'
             self.dig_cmd_pub.publish(cmd_msg)
     
-    def handle_manual_deposit(self, msg, button_pressed):
+    def handle_manual_deposit(self, msg, button_pressed, trigger_pressed):
         """Handle manual deposition operations"""
         if self.emergency_stop:
             return
@@ -397,8 +444,9 @@ class PlayStationController(Node):
                 self.dump_angle = max(self.dump_angle, 0.0)
                 self.get_logger().info(f'Dump angle: {self.dump_angle:.1f}°')
         
+        # FIX: use trigger_pressed (axis rising-edge) instead of msg.buttons[R2/L2]
         # R2 to dump
-        if PS4Button.R2 in button_pressed:
+        if PS4Axis.R2_ANALOG in trigger_pressed:
             self.get_logger().info('📤 Dumping material')
             cmd_msg = String()
             cmd_msg.data = 'dump'
@@ -406,27 +454,28 @@ class PlayStationController(Node):
             self.depositing_active = True
         
         # L2 to return to neutral
-        if PS4Button.L2 in button_pressed:
+        if PS4Axis.L2_ANALOG in trigger_pressed:
             self.get_logger().info('↩️  Returning to neutral')
             cmd_msg = String()
             cmd_msg.data = 'reset'
             self.deposit_cmd_pub.publish(cmd_msg)
             self.depositing_active = False
     
-    def handle_autonomous(self, button_pressed):
+    def handle_autonomous(self, button_pressed, trigger_pressed):
         """Handle autonomous mission control"""
         if self.emergency_stop:
             return
         
+        # FIX: use trigger_pressed (axis rising-edge) instead of msg.buttons[R2/L2]
         # R2 to start mission
-        if PS4Button.R2 in button_pressed:
+        if PS4Axis.R2_ANALOG in trigger_pressed:
             self.get_logger().info('🚀 Starting autonomous mission')
             cmd_msg = String()
             cmd_msg.data = 'start'
             self.mission_cmd_pub.publish(cmd_msg)
         
         # L2 to stop mission
-        if PS4Button.L2 in button_pressed:
+        if PS4Axis.L2_ANALOG in trigger_pressed:
             self.get_logger().info('⏹️  Stopping mission')
             cmd_msg = String()
             cmd_msg.data = 'stop'
