@@ -8,21 +8,25 @@
 
                     ┌─────────────────────┐
                     │    [OPTIONS] [PS]   │  ← EMERGENCY
-                    │    ⚙️ STOP   🔄 RESET │
+                    │    🚨 STOP   🔄 RESET │
                     └─────────────────────┘
                            [SHARE]
                            🆑 CLEAR
 
 
     ┌──────┐                                           ┌──────┐
-    │  L1  │  ← PRECISION MODE (0.5x SPEED)           │  R1  │
+    │  L1  │  ← PRECISION MODE (0.5x SPEED)           │  R1  │  → TURBO MODE (2x)
     └──────┘                                           └──────┘
-           ↓                                                 ↓
+
     ┌──────┐                                           ┌──────┐
-    │  L2  │                                           │  R2  │
+    │  L2  │  ← ANALOG TRIGGER (press to activate)    │  R2  │  → ANALOG TRIGGER (press to activate)
     └──────┘                                           └──────┘
-                                                             ↓
-                                                    TURBO MODE (2x)
+       ↓                                                  ↓
+  STOP / NEUTRAL                                    START / DUMP
+  (50%+ press)                                      (50%+ press)
+
+  ⚠️  L2 and R2 are ANALOG TRIGGERS, not buttons.
+      They must be pressed past 50% to register an action.
 
 
     ┌─────────┐                              ┌─────────┐
@@ -35,14 +39,14 @@
 
 
                          ┌──[△]──┐
-                         │ DIGGING│
-                    ┌────┴────────┴────┐
-               [□]  │   AUTONOMOUS     │  [○]
-            AUTONOM│                   │DEPOSITION
-                    └────┬────────┬────┘
-                         │  [×]   │
-                         │ DRIVE  │
-                         └────────┘
+                         │DIGGING│
+                    ┌────┴───────┴────┐
+               [□]  │                 │  [○]
+            AUTONOM │                 │ DEPOSIT
+                    └────┬───────┬────┘
+                         │  [×]  │
+                         │ DRIVE │
+                         └───────┘
 
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -66,14 +70,19 @@
 │  │ Result: ◄═══════════      │  = Reverse straight                 │
 │  └───────────────────────────┘                                     │
 │                                                                      │
-│  ┌─ SPIN LEFT ───────────────┐                                     │
-│  │ Left:  ↓  Right: ↑        │  Left back, right forward           │
-│  │ Result:     ↺             │  = Spin in place (zero radius!)     │
-│  └───────────────────────────┘                                     │
-│                                                                      │
 │  ┌─ SPIN RIGHT ──────────────┐                                     │
 │  │ Left:  ↑  Right: ↓        │  Left forward, right back           │
-│  │ Result:     ↻             │  = Spin in place (zero radius!)     │
+│  │ Result:     ↻             │  = Spin right in place              │
+│  └───────────────────────────┘                                     │
+│                                                                      │
+│  ┌─ SPIN LEFT ───────────────┐                                     │
+│  │ Left:  ↓  Right: ↑        │  Left back, right forward           │
+│  │ Result:     ↺             │  = Spin left in place               │
+│  └───────────────────────────┘                                     │
+│                                                                      │
+│  ┌─ GRADUAL RIGHT TURN ──────┐                                     │
+│  │ Left:  ↑  Right: ↑½       │  Left faster than right             │
+│  │ Result:    ╲              │  = Gentle arc right                 │
 │  └───────────────────────────┘                                     │
 │                                                                      │
 │  ┌─ GRADUAL LEFT TURN ───────┐                                     │
@@ -81,9 +90,9 @@
 │  │ Result:    ╱              │  = Gentle arc left                  │
 │  └───────────────────────────┘                                     │
 │                                                                      │
-│  ┌─ GRADUAL RIGHT TURN ──────┐                                     │
-│  │ Left:  ↑  Right: ↑½       │  Left faster than right             │
-│  │ Result:    ╲              │  = Gentle arc right                 │
+│  ┌─ PIVOT TURN RIGHT ────────┐                                     │
+│  │ Left:  ↑  Right: —        │  Left forward, right stopped        │
+│  │ Result:    ⌒              │  = Pivot on right track             │
 │  └───────────────────────────┘                                     │
 │                                                                      │
 │  ┌─ PIVOT TURN LEFT ─────────┐                                     │
@@ -96,7 +105,7 @@
 │  • Hold R1 for TURBO (competitions, long distances)               │
 │  • Hold L1 for PRECISION (positioning, tight spaces)              │
 │  • Practice spinning in place - very useful!                       │
-│  • Can "crab" sideways by spinning while moving                    │
+│  • Both sticks at equal & opposite speeds = tightest spin         │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 
@@ -113,19 +122,19 @@
 │                                                                      │
 │  ⛏️  DIG MODE - Press [△] to enter                                 │
 │  ├─ D-Pad ↑/↓:     Adjust depth (±5cm)                             │
-│  ├─ R2:            START DIGGING                                    │
-│  ├─ L2:            STOP DIGGING                                     │
+│  ├─ R2 (analog):   START DIGGING  ← press past 50%                │
+│  ├─ L2 (analog):   STOP DIGGING   ← press past 50%                │
 │  ├─ R1:            Raise excavator                                  │
 │  └─ L1:            Lower excavator                                  │
 │                                                                      │
 │  📤 DEPOSIT MODE - Press [○] to enter                              │
 │  ├─ D-Pad ↑/↓:     Adjust angle (±5°)                              │
-│  ├─ R2:            DUMP MATERIAL                                    │
-│  └─ L2:            Return to neutral                                │
+│  ├─ R2 (analog):   DUMP MATERIAL  ← press past 50%                │
+│  └─ L2 (analog):   Return to neutral ← press past 50%             │
 │                                                                      │
 │  🤖 AUTONOMOUS MODE - Press [□] to enter                           │
-│  ├─ R2:            START MISSION                                    │
-│  ├─ L2:            STOP MISSION                                     │
+│  ├─ R2 (analog):   START MISSION  ← press past 50%                │
+│  ├─ L2 (analog):   STOP MISSION   ← press past 50%                │
 │  ├─ R1:            Pause mission                                    │
 │  └─ L1:            Resume mission                                   │
 │                                                                      │
@@ -147,9 +156,9 @@
 │     └─ Pull both sticks back equally to reverse                    │
 │                                                                      │
 │  2️⃣  SPIN IN PLACE (MOST IMPORTANT!)                               │
-│     └─ Left stick back, right stick forward                        │
-│     └─ Rotate 360° without moving                                  │
-│     └─ Practice both directions                                    │
+│     └─ Left stick forward, right stick back → SPIN RIGHT           │
+│     └─ Left stick back, right stick forward → SPIN LEFT            │
+│     └─ Rotate 360° without moving, both directions                 │
 │                                                                      │
 │  3️⃣  GENTLE TURNS                                                   │
 │     └─ Both sticks forward, but one slightly less                  │
@@ -170,6 +179,12 @@
 │     └─ Drive forward at medium speed                               │
 │     └─ Press OPTIONS immediately                                   │
 │     └─ Rover should stop instantly                                 │
+│                                                                      │
+│  7️⃣  TRIGGER TEST (NEW - verify L2/R2 work correctly)             │
+│     └─ Enter DIG MODE (press △)                                    │
+│     └─ Squeeze R2 past halfway → digging should START             │
+│     └─ Squeeze L2 past halfway → digging should STOP              │
+│     └─ Light touch should NOT trigger anything                     │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 
@@ -200,8 +215,9 @@
 │  3. Test Controls:                                                   │
 │     • Both sticks up → Move forward                                │
 │     • Both sticks down → Move backward                             │
-│     • Left down, right up → Spin left                              │
-│     • Adjust speeds for turns                                      │
+│     • Left forward, right back → Spin RIGHT                        │
+│     • Left back, right forward → Spin LEFT                         │
+│     • Adjust speeds for gradual turns                              │
 │                                                                      │
 │  4. Practice:                                                        │
 │     • Drive in a square (forward, spin 90°, repeat)                │
@@ -217,14 +233,15 @@
 
               LEFT ↑  RIGHT ↑  →  FORWARD
               LEFT ↓  RIGHT ↓  →  BACKWARD
-              LEFT ↓  RIGHT ↑  →  SPIN LEFT
               LEFT ↑  RIGHT ↓  →  SPIN RIGHT
+              LEFT ↓  RIGHT ↑  →  SPIN LEFT
               LEFT ↑  RIGHT ↑½ →  TURN RIGHT
               LEFT ↑½ RIGHT ↑  →  TURN LEFT
-              LEFT —  RIGHT ↑  →  PIVOT RIGHT
-              LEFT ↑  RIGHT —  →  PIVOT LEFT
+              LEFT ↑  RIGHT —  →  PIVOT RIGHT
+              LEFT —  RIGHT ↑  →  PIVOT LEFT
 
               Hold R1 = TURBO  |  Hold L1 = PRECISION
+              L2 / R2 = ANALOG TRIGGERS (squeeze past 50%)
 
 
 ═══════════════════════════════════════════════════════════════════════
@@ -232,10 +249,11 @@
               🏆 COMPETITION DAY CHECKLIST 🏆
 
               [ ]  Practiced driving in straight lines
-              [ ]  Can spin 360° smoothly
+              [ ]  Can spin 360° smoothly (both directions)
               [ ]  Comfortable with gradual turns
               [ ]  Tested precision mode (L1)
               [ ]  Tested turbo mode (R1)
+              [ ]  Verified L2/R2 triggers register correctly
               [ ]  Emergency stop muscle memory
               [ ]  Partner knows how to drive
               [ ]  Controller fully charged
@@ -247,3 +265,4 @@
               Team Moonrockers | NASA Lunabotics 2026
         "Skid-steer: The secret weapon of championship rovers"
 ═══════════════════════════════════════════════════════════════════════
+```
