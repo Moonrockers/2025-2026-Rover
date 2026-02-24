@@ -259,7 +259,7 @@ class MotorController(Node):
 
         while not self._shutting_down and self._can_bus is not None:
             try:
-                msg = self._can_bus.recv(timeout=0.1)
+                msg = self._can_bus.recv(timeout=0.01)
                 if msg is not None:
                     for motor in motors:
                         motor.handle_incoming(msg)
