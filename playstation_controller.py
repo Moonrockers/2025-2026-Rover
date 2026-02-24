@@ -1,35 +1,44 @@
 import threading
 import time
 
-class Joypad:
+class PlayStationController:
     def __init__(self):
-        self.lock = threading.Lock()
-        self.parameters = {}
-        self.heartbeat_active = True
+        self.joy_msg_lock = threading.Lock()
+        self.joypad_status = {}
+        self.last_heartbeat = time.time()
+        self.parameter_cache = {}
+        self.timeout = 10  # seconds
+        # ... additional initialization code ...
 
-    def set_parameter(self, key, value):
-        with self.lock:
-            self.parameters[key] = value
+    def read_joy_msg(self):
+        with self.joy_msg_lock:
+            # code to read joy_msg
+            self.last_heartbeat = time.time()
+            # ... process joy_msg ...
 
-    def get_parameter(self, key):
-        with self.lock:
-            return self.parameters.get(key, None)
-
-    def joypad_heartbeat(self):
-        while self.heartbeat_active:
-            print("Sending heartbeat...")
-            time.sleep(1)
-
-    def start_heartbeat(self):
-        heartbeat_thread = threading.Thread(target=self.joypad_heartbeat)
-        heartbeat_thread.start()
-
-    def control_loop(self):
+    def check_joypad_heartbeat(self):
         while True:
-            # Simplified control logic
-            print("Controlling the rover...")
-            time.sleep(0.5)
+            if time.time() - self.last_heartbeat > self.timeout:
+                self.handle_joypad_timeout()
+            time.sleep(1)  # check every second
 
-joypad = Joypad()
-joypad.start_heartbeat()
-joypad.control_loop()
+    def handle_joypad_timeout(self):
+        print("Joypad timeout detected!")
+        # ... handle the timeout ...
+
+    def speed_ramp(self, target_speed):
+        current_speed = 0
+        while current_speed < target_speed:
+            current_speed += 1  # Increment speed
+            # code to set motor feedback
+            time.sleep(0.1)  # simulation of ramping time
+
+    def cache_parameters(self, key, value):
+        self.parameter_cache[key] = value
+
+    # ... additional methods ...
+
+# Example usage:
+# controller = PlayStationController()
+# controller.read_joy_msg()
+# controller.check_joypad_heartbeat()
